@@ -5,7 +5,7 @@ extern fn __vec_new__() -> Vector {
 }
 extern fn __vec_repeat__(initial: Element, count: Int) -> Vector {
     cpp_name: "vector_function_1",
-    code: "Obj<NativeVec> vector_function_1(Obj<NativeElement> initial, Obj<std::int64_t> count, [[maybe_unused]] Loc loc) { if(*count<0) fail(loc,\"negative array length\"); auto a=make_obj<NativeVec>(NativeVec{}); if(static_cast<__int128>(*count)>static_cast<__int128>(a->max_size())) fail(loc,\"array length out of range\"); a->reserve(static_cast<std::size_t>(*count)); for(std::int64_t i=0;i<*count;++i) a->push_back(deep_copy(initial)); return a; }",
+    code: "Obj<NativeVec> vector_function_1(Obj<NativeElement> initial, Obj<std::int64_t> count, [[maybe_unused]] Loc loc) { if(*count<0) fail(loc,\"negative array length\"); auto a=make_obj<NativeVec>(NativeVec{}); if(static_cast<__int128>(*count)>static_cast<__int128>(a->max_size())) fail(loc,\"array length out of range\"); a->reserve(static_cast<std::size_t>(*count)); for(std::int64_t i=0;i<*count;++i) a->push_back(deep_copy(initial,loc)); return a; }",
 }
 extern fn len(a: Vector) -> Int {
     cpp_name: "vector_function_2",
@@ -25,11 +25,11 @@ extern fn __setitem__(a: Vector, i: Int, x: Element) -> Element {
 }
 extern fn copy(a: Vector) -> Vector {
     cpp_name: "vector_function_6",
-    code: "Obj<NativeVec> vector_function_6(Obj<NativeVec> a, [[maybe_unused]] Loc loc) { return deep_copy(a); }",
+    code: "Obj<NativeVec> vector_function_6(Obj<NativeVec> a, [[maybe_unused]] Loc loc) { return deep_copy(a,loc); }",
 }
 extern fn __assign__(a: Vector, b: Vector) {
     cpp_name: "vector_function_7",
-    code: "void vector_function_7(Obj<NativeVec> a, Obj<NativeVec> b, [[maybe_unused]] Loc loc) { auto snapshot=deep_copy(b); a->assign(snapshot->begin(),snapshot->end()); ++a->version; }",
+    code: "void vector_function_7(Obj<NativeVec> a, Obj<NativeVec> b, [[maybe_unused]] Loc loc) { auto snapshot=deep_copy(b,loc); a->assign(snapshot->begin(),snapshot->end()); ++a->version; }",
 }
 extern fn __bool__(a: Vector) -> Bool {
     cpp_name: "vector_function_8",

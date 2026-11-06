@@ -17,7 +17,13 @@ def main():
     deps_parser.add_argument('source', type=Path)
     args = parser.parse_args()
     if args.command == 'dependencies':
-        paths = [args.source.resolve(), Path(__file__).resolve()]
+        subprocess.run(['cargo', 'build', '--locked', '--release'], cwd=ROOT, check=True)
+        dependencies = subprocess.check_output(
+            [str(ROOT / 'target/release/rusk'), 'dependencies', str(args.source.resolve())],
+            text=True,
+        )
+        paths = [Path(path) for path in dependencies.splitlines()]
+        paths.append(Path(__file__).resolve())
         paths += [ROOT / name for name in (
             'Cargo.toml', 'Cargo.lock', 'build.rs', 'rusk.par',
             'requirements-verify.txt', '.verify-helper/config.toml',

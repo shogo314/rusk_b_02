@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run the reference-lifetime cases under AddressSanitizer and UBSan."""
 import argparse
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -27,6 +28,22 @@ while s[0]=='a' { s.push_back('!'); s[0]='b'; continue; }
 for i in 0..3 { let c:=s[0]; if i==1 { break; } continue; }
 s.push_back('?'); wt s;
 ''', b'', b'200 Z Z\n200\nb!?\n'),
+    ('''struct Envelope<T> { payload:T; }
+let text:="abc";
+let envelope:=Envelope::<Char> { payload:text[0] };
+let held:=envelope.payload;
+envelope.payload:='Z'; held:='Q'; text.push_back('!'); wt text;
+let original:=Envelope::<(Str,Vec<Int>)> { payload:("old",[1,2]) };
+let old:=original.payload[1][0];
+let detached = original; original=Envelope::<(Str,Vec<Int>)> { payload:("new",[9]) };
+detached.payload[1][0]=7; wt old,detached.payload,original.payload;
+''', b'', b'abc!\n1 old 7 2 new 9\n'),
+    (f'include {json.dumps(str(ROOT/"examples/beta02/library/fenwick.rusk"))};\n'
+     f'include {json.dumps(str(ROOT/"examples/beta02/library/sum_segment_tree.rusk"))};\n'
+     + '''let fw:=Fenwick([1,2,3],0); let detached = fw;
+fw.add(1,4); wt fw.prefix_sum(3),detached.prefix_sum(3);
+let seg:=SumSegTree(["a","b","c"],""); seg.set(1,"X"); wt seg.prod(0,3);
+''', b'', b'10 6\naXc\n'),
     ((ROOT/'examples/prototype/grid_bfs.rusk').read_text(), b'3 4\n....\n.##.\n....\n', b'5\n'),
 ]
 

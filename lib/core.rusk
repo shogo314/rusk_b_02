@@ -454,3 +454,23 @@ extern fn sum(a: Vec<Int>, initial: Int) -> Int {
     cpp_name: "convenience_7",
     code: "Obj<std::int64_t> convenience_7(Obj<IntVec> a, Obj<std::int64_t> initial, [[maybe_unused]] Loc loc) { std::int64_t total=*initial; for(const auto& x:*a) total=checked_int(static_cast<__int128>(total)+*x,loc); return make_obj<std::int64_t>(total); }",
 }
+
+extern fn __bitand__(a: Int, b: Int) -> Int {
+    cpp_name: "rusk_bitand_int",
+    code: "Obj<std::int64_t> rusk_bitand_int(Obj<std::int64_t> a, Obj<std::int64_t> b, Loc) { return make_obj<std::int64_t>(*a & *b); }",
+}
+
+extern fn __bitor__(a: Int, b: Int) -> Int {
+    cpp_name: "rusk_bitor_int",
+    code: "Obj<std::int64_t> rusk_bitor_int(Obj<std::int64_t> a, Obj<std::int64_t> b, Loc) { return make_obj<std::int64_t>(*a | *b); }",
+}
+
+extern fn __bitxor__(a: Int, b: Int) -> Int {
+    cpp_name: "rusk_bitxor_int",
+    code: "Obj<std::int64_t> rusk_bitxor_int(Obj<std::int64_t> a, Obj<std::int64_t> b, Loc) { return make_obj<std::int64_t>(*a ^ *b); }",
+}
+
+extern fn assert(condition: Bool) {
+    cpp_name: "rusk_assert",
+    code: "void rusk_assert(Obj<bool> condition, Loc loc) { if (!*condition) fail(loc,\"assertion failed\"); }",
+}

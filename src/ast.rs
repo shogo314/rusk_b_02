@@ -31,12 +31,96 @@ fn name(n: &g::Identifier<'_>) -> Name {
         span: Span::token(&n.identifier),
     }
 }
-fn type_name(t: &g::TypeName<'_>) -> Name {
+fn type_parameters(t: &g::TypeParameters<'_>) -> Vec<Name> {
+    std::iter::once(t.identifier.as_ref())
+        .chain(t.type_parameters_list.iter().map(|t| t.identifier.as_ref()))
+        .map(name)
+        .collect()
+}
+fn reference(t: &g::Reference<'_>) -> Name {
     let mut n = name(&t.identifier);
-    if let Some(arg) = &t.type_name_opt {
-        n.text = format!("{}<{}>", n.text, type_name(&arg.type_name).text);
+    if let Some(arguments) = &t.reference_opt {
+        n.text = format!(
+            "{}<{}>",
+            n.text,
+            type_arguments(&arguments.type_arguments)
+                .iter()
+                .map(|t| t.text.clone())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
     }
     n
+}
+fn type_arguments(t: &g::TypeArguments<'_>) -> Vec<Name> {
+    std::iter::once(t.type_name.as_ref())
+        .chain(t.type_arguments_list.iter().map(|t| t.type_name.as_ref()))
+        .map(type_name)
+        .collect()
+}
+fn type_name(t: &g::TypeName<'_>) -> Name {
+    match t {
+        g::TypeName::NamedType(t) => {
+            let mut n = name(&t.named_type.identifier);
+            if let Some(args) = &t.named_type.named_type_opt {
+                n.text = format!(
+                    "{}<{}>",
+                    n.text,
+                    type_arguments(&args.type_arguments)
+                        .iter()
+                        .map(|t| t.text.clone())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                );
+            }
+            n
+        }
+        g::TypeName::TupleType(t) => {
+            let t = &t.tuple_type;
+            let types = std::iter::once(t.type_name.as_ref())
+                .chain(std::iter::once(t.type_name0.as_ref()))
+                .chain(t.tuple_type_list.iter().map(|t| t.type_name.as_ref()))
+                .map(type_name)
+                .collect::<Vec<_>>();
+            Name {
+                text: format!(
+                    "Tuple<{}>",
+                    types
+                        .iter()
+                        .map(|t| t.text.clone())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+                span: types[0].span.clone(),
+            }
+        }
+    }
+}
+#[derive(Clone, Debug)]
+pub enum Binding {
+    Name(Name),
+    Tuple(Vec<Binding>, Span),
+}
+impl Binding {
+    pub fn span(&self) -> &Span {
+        match self {
+            Self::Name(n) => &n.span,
+            Self::Tuple(_, span) => span,
+        }
+    }
+}
+fn binding(b: &g::Binding<'_>) -> Binding {
+    match b {
+        g::Binding::Identifier(n) => Binding::Name(name(&n.identifier)),
+        g::Binding::LParenBindingCommaBindingBindingListRParen(t) => Binding::Tuple(
+            std::iter::once(t.binding.as_ref())
+                .chain(std::iter::once(t.binding0.as_ref()))
+                .chain(t.binding_list.iter().map(|b| b.binding.as_ref()))
+                .map(binding)
+                .collect(),
+            Span::token(&t.l_paren),
+        ),
+    }
 }
 #[derive(Clone, Debug)]
 pub struct Expr {
@@ -47,10 +131,13 @@ pub struct Expr {
 pub enum ExprKind {
     Literal(String, String),
     Array(Vec<Expr>),
+    Tuple(Vec<Expr>),
     Repeat(Box<Expr>, Box<Expr>),
     Range(Box<Expr>, Box<Expr>),
     Logical(String, Box<Expr>, Box<Expr>),
     Index(Box<Expr>, Box<Expr>),
+    Field(Box<Expr>, Name),
+    Record(Name, Vec<(Name, Expr)>),
     Var(Name),
     Call(Name, Vec<Expr>),
     Binary(String, Box<Expr>, Box<Expr>),
@@ -64,6 +151,8 @@ pub enum Initializer {
 }
 #[derive(Clone, Debug)]
 pub enum Stmt {
+    Include(String, Span),
+    Struct(Name, Vec<Name>, Vec<(Name, Name)>),
     Type(Name, BTreeMap<String, String>),
     Function(
         Name,
@@ -71,16 +160,16 @@ pub enum Stmt {
         Option<Name>,
         BTreeMap<String, String>,
     ),
-    UserFunction(Name, Vec<(Name, Name)>, Option<Name>, Box<Stmt>),
+    UserFunction(Name, Vec<Name>, Vec<(Name, Name)>, Option<Name>, Box<Stmt>),
     Return(Span, Option<Expr>),
     Symbol(Name, BTreeMap<String, String>),
-    Let(Name, Option<Name>, Option<Initializer>),
+    Let(Binding, Option<Name>, Option<Initializer>),
     Input(Vec<(Name, Name, Vec<Expr>)>),
     Output(Vec<Expr>),
     Block(Vec<Stmt>),
     If(Expr, Box<Stmt>, Option<Box<Stmt>>),
     While(Expr, Box<Stmt>, Option<Box<Stmt>>),
-    For(Name, Expr, Box<Stmt>, Option<Box<Stmt>>),
+    For(Binding, Expr, Box<Stmt>, Option<Box<Stmt>>),
     Loop(Box<Stmt>),
     Break(Span),
     Continue(Span),
@@ -104,6 +193,29 @@ pub fn lower(root: &g::Rusk<'_>) -> Result<Vec<Stmt>, String> {
 }
 fn stmt(s: &g::Statement<'_>) -> Result<Stmt, String> {
     Ok(match s {
+        g::Statement::Include(x) => Stmt::Include(
+            serde_json::from_str(x.include.string_literal.string_literal.text())
+                .map_err(|e| Span::token(&x.include.string_literal.string_literal).error(e))?,
+            Span::token(&x.include.string_literal.string_literal),
+        ),
+        g::Statement::StructDef(x) => Stmt::Struct(
+            name(&x.struct_def.identifier),
+            x.struct_def
+                .struct_def_opt
+                .as_ref()
+                .map(|p| type_parameters(&p.type_parameters))
+                .unwrap_or_default(),
+            x.struct_def
+                .struct_def_list
+                .iter()
+                .map(|field| {
+                    (
+                        name(&field.struct_field.identifier),
+                        type_name(&field.struct_field.type_name),
+                    )
+                })
+                .collect(),
+        ),
         g::Statement::ExternType(x) => Stmt::Type(
             type_name(&x.extern_type.type_name),
             props(&x.extern_type.properties)?,
@@ -151,8 +263,12 @@ fn stmt(s: &g::Statement<'_>) -> Result<Stmt, String> {
             }
             Stmt::UserFunction(
                 name(&x.identifier),
+                x.function_opt
+                    .as_ref()
+                    .map(|p| type_parameters(&p.type_parameters))
+                    .unwrap_or_default(),
                 params,
-                x.function_opt.as_ref().map(|r| type_name(&r.type_name)),
+                x.function_opt0.as_ref().map(|r| type_name(&r.type_name)),
                 Box::new(block(&x.block)?),
             )
         }
@@ -167,7 +283,7 @@ fn stmt(s: &g::Statement<'_>) -> Result<Stmt, String> {
         g::Statement::Let(x) => {
             let x = &x.r#let;
             Stmt::Let(
-                name(&x.identifier),
+                binding(&x.binding),
                 x.let_opt.as_ref().map(|t| type_name(&t.type_name)),
                 x.let_opt0
                     .as_ref()
@@ -213,7 +329,7 @@ fn stmt(s: &g::Statement<'_>) -> Result<Stmt, String> {
                 .transpose()?,
         ),
         g::Statement::For(x) => Stmt::For(
-            name(&x.r#for.identifier),
+            binding(&x.r#for.binding),
             expr(&x.r#for.expr)?,
             Box::new(block(&x.r#for.block)?),
             x.r#for
@@ -301,12 +417,57 @@ fn logical_or(e: &g::LogicalOr<'_>) -> Result<Expr, String> {
     Ok(left)
 }
 fn logical_and(e: &g::LogicalAnd<'_>) -> Result<Expr, String> {
-    let mut left = compare(&e.compare)?;
+    let mut left = bit_or(&e.bit_or)?;
     for right in &e.logical_and_list {
         let span = left.span.clone();
         left = Expr {
             kind: ExprKind::Logical(
                 "&&".into(),
+                Box::new(left),
+                Box::new(bit_or(&right.bit_or)?),
+            ),
+            span,
+        };
+    }
+    Ok(left)
+}
+fn bit_or(e: &g::BitOr<'_>) -> Result<Expr, String> {
+    let mut left = bit_xor(&e.bit_xor)?;
+    for right in &e.bit_or_list {
+        let span = left.span.clone();
+        left = Expr {
+            kind: ExprKind::Binary(
+                "|".into(),
+                Box::new(left),
+                Box::new(bit_xor(&right.bit_xor)?),
+            ),
+            span,
+        };
+    }
+    Ok(left)
+}
+fn bit_xor(e: &g::BitXor<'_>) -> Result<Expr, String> {
+    let mut left = bit_and(&e.bit_and)?;
+    for right in &e.bit_xor_list {
+        let span = left.span.clone();
+        left = Expr {
+            kind: ExprKind::Binary(
+                "^".into(),
+                Box::new(left),
+                Box::new(bit_and(&right.bit_and)?),
+            ),
+            span,
+        };
+    }
+    Ok(left)
+}
+fn bit_and(e: &g::BitAnd<'_>) -> Result<Expr, String> {
+    let mut left = compare(&e.compare)?;
+    for right in &e.bit_and_list {
+        let span = left.span.clone();
+        left = Expr {
+            kind: ExprKind::Binary(
+                "&".into(),
                 Box::new(left),
                 Box::new(compare(&right.compare)?),
             ),
@@ -386,13 +547,20 @@ fn postfix(p: &g::Postfix<'_>) -> Result<Expr, String> {
                 kind: ExprKind::Index(Box::new(value), Box::new(expr(&x.index.expr)?)),
                 span: Span::token(&x.index.l_bracket),
             },
-            g::Suffix::Method(x) => {
-                let n = name(&x.method.identifier);
-                let mut args = vec![value];
-                args.extend(list(&x.method.expr_list)?);
-                Expr {
-                    span: n.span.clone(),
-                    kind: ExprKind::Call(n, args),
+            g::Suffix::Member(x) => {
+                let n = name(&x.member.identifier);
+                if let Some(call) = &x.member.member_opt {
+                    let mut args = vec![value];
+                    args.extend(list(&call.expr_list)?);
+                    Expr {
+                        span: n.span.clone(),
+                        kind: ExprKind::Call(n, args),
+                    }
+                } else {
+                    Expr {
+                        span: n.span.clone(),
+                        kind: ExprKind::Field(Box::new(value), n),
+                    }
                 }
             }
         };
@@ -427,13 +595,45 @@ fn primary(e: &g::Primary<'_>) -> Result<Expr, String> {
                 span: Span::token(&x.array.l_bracket),
             }
         }
-        g::Primary::LParenExprRParen(x) => return expr(&x.expr),
-        g::Primary::IdentifierPrimaryOpt(x) => {
-            let n = name(&x.identifier);
+        g::Primary::LParenExprPrimaryOpt0RParen(x) => {
+            let first = expr(&x.expr)?;
+            if let Some(tail) = &x.primary_opt0 {
+                let mut values = vec![first];
+                values.push(expr(&tail.tuple_tail.expr)?);
+                for item in &tail.tuple_tail.tuple_tail_list {
+                    values.push(expr(&item.expr)?);
+                }
+                Expr {
+                    span: Span::token(&x.l_paren),
+                    kind: ExprKind::Tuple(values),
+                }
+            } else {
+                return Ok(first);
+            }
+        }
+        g::Primary::ReferencePrimaryOpt(x) => {
+            let n = reference(&x.reference);
             Expr {
                 span: n.span.clone(),
                 kind: if let Some(args) = &x.primary_opt {
-                    ExprKind::Call(n, list(&args.expr_list)?)
+                    match args.primary_tail.as_ref() {
+                        g::PrimaryTail::LParenExprListRParen(call) => {
+                            ExprKind::Call(n, list(&call.expr_list)?)
+                        }
+                        g::PrimaryTail::RecordFields(record) => {
+                            let fields = &record.record_fields;
+                            let values = std::iter::once(fields.field_value.as_ref())
+                                .chain(
+                                    fields
+                                        .record_fields_list
+                                        .iter()
+                                        .map(|f| f.field_value.as_ref()),
+                                )
+                                .map(|f| Ok((name(&f.identifier), expr(&f.expr)?)))
+                                .collect::<Result<_, String>>()?;
+                            ExprKind::Record(n, values)
+                        }
+                    }
                 } else {
                     ExprKind::Var(n)
                 },

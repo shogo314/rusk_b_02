@@ -1,6 +1,7 @@
 mod ast;
 mod compiler;
 mod rusk_grammar;
+mod source;
 #[allow(warnings)]
 mod rusk_grammar_trait {
     include!(concat!(env!("OUT_DIR"), "/rusk_grammar_trait.rs"));
@@ -32,15 +33,28 @@ fn parse(text: &str, file: &str) -> Result<Vec<ast::Stmt>, String> {
 }
 fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
-    let command = args.next().ok_or("usage: rusk compile FILE [-o OUTPUT]")?;
+    let command = args
+        .next()
+        .ok_or("usage: rusk compile FILE [-o OUTPUT] | dependencies FILE")?;
     if command == "--help" || command == "-h" {
-        println!("usage: rusk compile FILE [-o OUTPUT]\nGenerate C++20 source (default: a.cpp).");
+        println!(
+            "usage: rusk compile FILE [-o OUTPUT] | dependencies FILE\nGenerate C++20 source (default: a.cpp), or list source dependencies."
+        );
         return Ok(());
     }
-    if command != "compile" {
+    if command != "compile" && command != "dependencies" {
         return Err(format!("unknown command '{command}'"));
     }
     let file = args.next().ok_or("missing source file")?;
+    if command == "dependencies" {
+        if let Some(arg) = args.next() {
+            return Err(format!("unknown argument '{arg}'"));
+        }
+        for path in source::load(std::path::Path::new(&file))?.dependencies {
+            println!("{}", path.display());
+        }
+        return Ok(());
+    }
     let mut output = "a.cpp".to_string();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -48,13 +62,12 @@ fn run() -> Result<(), String> {
             _ => return Err(format!("unknown argument '{arg}'")),
         }
     }
-    let text = std::fs::read_to_string(&file).map_err(|e| format!("{file}: {e}"))?;
     let core = parse(CORE, "<stdlib/core.rusk>")?;
     let collections = parse(
         include_str!("../lib/collections.rusk"),
         "<stdlib/collections.rusk>",
     )?;
-    let source = parse(&text, &file)?;
+    let source = source::load(std::path::Path::new(&file))?.statements;
     let cpp = compiler::Compiler::default().compile(&[core, collections, source])?;
     std::fs::write(&output, cpp).map_err(|e| format!("{output}: {e}"))?;
     Ok(())

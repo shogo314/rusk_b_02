@@ -1,5 +1,8 @@
-use crate::ast::{Expr, ExprKind, Initializer, Name, Span, Stmt};
+use crate::ast::{Binding, Expr, ExprKind, Initializer, Name, Span, Stmt};
 use std::collections::{BTreeMap, BTreeSet};
+mod generics;
+mod records;
+mod tuples;
 
 #[derive(Clone)]
 struct Function {
@@ -24,6 +27,13 @@ struct Value {
 #[derive(Default)]
 pub struct Compiler {
     types: BTreeMap<String, String>,
+    records: BTreeMap<String, records::Record>,
+    prepared_records: BTreeSet<String>,
+    record_copies: BTreeMap<String, Vec<usize>>,
+    generic_records: BTreeMap<String, generics::GenericRecord>,
+    generic_functions: Vec<generics::GenericFunction>,
+    generic_instances: BTreeMap<(usize, Vec<String>), usize>,
+    generic_calls: BTreeMap<usize, Span>,
     functions: Vec<Function>,
     symbols: BTreeMap<String, String>,
     scopes: Vec<BTreeMap<String, Variable>>,
@@ -67,7 +77,47 @@ impl Compiler {
     pub fn compile(mut self, sources: &[Vec<Stmt>]) -> Result<String, String> {
         for source in sources {
             for s in source {
+                if let Stmt::UserFunction(name, parameters, arguments, result, body) = s
+                    && !parameters.is_empty()
+                {
+                    self.register_generic_function(generics::GenericFunction {
+                        name: name.clone(),
+                        parameters: parameters.clone(),
+                        arguments: arguments.clone(),
+                        result: result.clone(),
+                        body: body.clone(),
+                    })?;
+                }
+                if let Stmt::Struct(name, parameters, fields) = s {
+                    if matches!(name.text.as_str(), "Vec" | "Tuple" | "Iter") {
+                        return Err(name.span.error("reserved built-in type constructor"));
+                    }
+                    if !parameters.is_empty() {
+                        self.register_generic_record(generics::GenericRecord {
+                            name: name.clone(),
+                            parameters: parameters.clone(),
+                            fields: fields.clone(),
+                        })?;
+                        continue;
+                    }
+                    let native = format!("RuskRecord{}", self.records.len());
+                    if self.generic_records.contains_key(&name.text)
+                        || self.types.insert(name.text.clone(), native).is_some()
+                    {
+                        return Err(name.span.error("duplicate type"));
+                    }
+                    self.records.insert(
+                        name.text.clone(),
+                        records::Record {
+                            name: name.clone(),
+                            fields: fields.clone(),
+                        },
+                    );
+                }
                 if let Stmt::Type(n, p) = s {
+                    if self.generic_records.contains_key(&n.text) {
+                        return Err(n.span.error("duplicate type"));
+                    }
                     validate(n, p, &["cpp_name"])?;
                     if self
                         .types
@@ -79,17 +129,23 @@ impl Compiler {
                 }
             }
         }
+        self.prepare_records()?;
         for source in sources {
             for s in source {
+                if let Stmt::UserFunction(_, parameters, ..) = s
+                    && !parameters.is_empty()
+                {
+                    continue;
+                }
                 match s {
                     Stmt::Function(n, params, result, _)
-                    | Stmt::UserFunction(n, params, result, _) => {
+                    | Stmt::UserFunction(n, _, params, result, _) => {
                         let (cpp, code, body) = match s {
                             Stmt::Function(_, _, _, p) => {
                                 validate(n, p, &["cpp_name", "code"])?;
                                 (property(n, p, "cpp_name")?, property(n, p, "code")?, None)
                             }
-                            Stmt::UserFunction(_, params, _, body) => (
+                            Stmt::UserFunction(_, _, params, _, body) => (
                                 format!("rusk_fn{}", self.functions.len()),
                                 String::new(),
                                 Some((
@@ -159,12 +215,48 @@ impl Compiler {
                 self.statement(s)?;
             }
         }
+        let main_body = std::mem::take(&mut self.body);
+        let mut index = 0;
+        loop {
+            while index < self.functions.len() {
+                if self.functions[index].body.is_some()
+                    && self.functions[index].code.is_empty()
+                    && let Err(error) = self.compile_function(index)
+                {
+                    if let Some(span) = self.generic_calls.get(&index) {
+                        return Err(format!(
+                            "{error}\nwhile instantiating '{}' at {}:{}:{}",
+                            self.generic_instances
+                                .iter()
+                                .find(|(_, value)| **value == index)
+                                .map(|((template, arguments), _)| format!(
+                                    "{}<{}>",
+                                    self.generic_functions[*template].name.text,
+                                    arguments.join(",")
+                                ))
+                                .unwrap_or_else(|| self.functions[index].name.text.clone()),
+                            span.file,
+                            span.line,
+                            span.column
+                        ));
+                    }
+                    return Err(error);
+                }
+                index += 1;
+            }
+            self.prepare_record_copies()?;
+            if index == self.functions.len() && self.record_copies.len() == self.records.len() {
+                break;
+            }
+        }
+        self.body = main_body;
         let mut out =
             String::from("// Generated by Rusk beta. C++20, GCC/Clang checked arithmetic.\n");
         for code in self.symbols.values() {
             out.push_str(code);
             out.push('\n');
         }
+        out.push_str(&self.record_cpp());
         for f in &self.functions {
             if f.body.is_some() {
                 out.push_str(&self.signature(f));
@@ -183,6 +275,7 @@ impl Compiler {
                 out.push('\n');
             }
         }
+        out.push_str(&self.record_copy_cpp());
         out.push_str("int main() {\n");
         out.push_str(&self.body);
         out.push_str("return 0;\n}\n");
@@ -245,23 +338,30 @@ impl Compiler {
     fn check_type(&mut self, n: &Name) -> Result<(), String> {
         if self.types.contains_key(&n.text) {
             Ok(())
+        } else if n.text.starts_with("Tuple<") {
+            self.specialize_tuple(n)
         } else if let Some(inner) = vector_element(&n.text) {
             let inner = inner.to_string();
-            if !matches!(inner.as_str(), "Int" | "Bool" | "Char" | "Str")
-                && vector_element(&inner).is_none()
-            {
-                return Err(n
-                    .span
-                    .error("prototype vectors require basic or vector element types"));
-            }
             self.check_type(&Name {
                 text: inner.clone(),
                 span: n.span.clone(),
             })?;
+            if !matches!(inner.as_str(), "Int" | "Bool" | "Char" | "Str")
+                && vector_element(&inner).is_none()
+                && !self.records.contains_key(&inner)
+            {
+                return Err(n
+                    .span
+                    .error("vectors require basic, struct or vector element types"));
+            }
             self.specialize_vector(&n.text, &inner)?;
             Ok(())
         } else {
-            Err(n.span.error(format!("unknown type '{}'", n.text)))
+            if self.specialize_record(n)? {
+                Ok(())
+            } else {
+                Err(n.span.error(format!("unknown type '{}'", n.text)))
+            }
         }
     }
     fn specialize_vector(&mut self, ty: &str, inner: &str) -> Result<(), String> {
@@ -282,7 +382,28 @@ impl Compiler {
             .replace("vector_function_", &prefix);
         for statement in crate::parse(&source, "<stdlib/vec.rusk>")? {
             if let Stmt::Function(name, params, result, properties) = statement {
-                if name.text == "__read__" && vector_element(inner).is_some() {
+                if name.text == "__read__"
+                    && (vector_element(inner).is_some() || self.records.contains_key(inner))
+                {
+                    continue;
+                }
+                if self.record_element(inner)
+                    && matches!(
+                        name.text.as_str(),
+                        "__write__"
+                            | "sort"
+                            | "sorted"
+                            | "bisect_left"
+                            | "bisect_right"
+                            | "contains"
+                            | "__eq__"
+                            | "__ne__"
+                            | "__lt__"
+                            | "__le__"
+                            | "__gt__"
+                            | "__ge__"
+                    )
+                {
                     continue;
                 }
                 self.functions.push(Function {
@@ -360,8 +481,9 @@ impl Compiler {
             .functions
             .iter()
             .enumerate()
-            .filter(|(_, f)| {
-                f.name.text == name
+            .filter(|(index, f)| {
+                !self.generic_calls.contains_key(index)
+                    && f.name.text == name
                     && f.params == args.iter().map(|v| v.ty.clone()).collect::<Vec<_>>()
                     && (!return_selected(name) || expected.is_none_or(|t| f.result == t))
             })
@@ -379,7 +501,7 @@ impl Compiler {
         expected: Option<&str>,
         s: &Span,
     ) -> Result<Value, String> {
-        let i = self.select(name, &args, expected, s)?.ok_or_else(|| {
+        let i = self.resolve(name, &args, expected, s)?.ok_or_else(|| {
             s.error(format!(
                 "no matching function '{name}' for ({})",
                 args.iter()
@@ -463,7 +585,11 @@ impl Compiler {
     }
     fn statement_inner(&mut self, s: &Stmt) -> Result<(), String> {
         match s {
+            Stmt::Include(_, span) => {
+                return Err(span.error("include is only allowed at top level"));
+            }
             Stmt::Type(n, _)
+            | Stmt::Struct(n, ..)
             | Stmt::Function(n, ..)
             | Stmt::UserFunction(n, ..)
             | Stmt::Symbol(n, _) => {
@@ -514,8 +640,15 @@ impl Compiler {
                     .as_ref()
                     .map(|n| n.text.clone())
                     .or_else(|| value.as_ref().map(|v| v.ty.clone()))
-                    .ok_or_else(|| n.span.error("uninitialized declaration requires a type"))?;
-                self.declare(n, ty, value)?;
+                    .ok_or_else(|| n.span().error("uninitialized declaration requires a type"))?;
+                if let Some(value) = value {
+                    self.same(&ty, &value.ty, n.span())?;
+                    self.declare_binding(n, value)?;
+                } else if let Binding::Name(name) = n {
+                    self.declare(name, ty, None)?;
+                } else {
+                    return Err(n.span().error("tuple binding requires an initializer"));
+                }
             }
             Stmt::Input(items) => {
                 for (n, t, args) in items {
@@ -595,7 +728,7 @@ impl Compiler {
             }
             Stmt::For(name, source, body, otherwise) => {
                 let source = self.expr(source, None)?;
-                let iterator = self.call("__iter__", vec![source], None, &name.span)?;
+                let iterator = self.call("__iter__", vec![source], None, name.span())?;
                 let before = self.scopes.clone();
                 let broken = otherwise.as_ref().map(|_| self.temp());
                 if let Some(flag) = &broken {
@@ -608,17 +741,22 @@ impl Compiler {
                     "__iter_has_next__",
                     vec![iterator.clone()],
                     None,
-                    &name.span,
+                    name.span(),
                 )?;
-                self.same("Bool", &has_next.ty, &name.span)?;
+                self.same("Bool", &has_next.ty, name.span())?;
                 self.body
                     .push_str(&format!("if (!*{}) break;\n", has_next.cpp));
                 self.scopes.push(BTreeMap::new());
-                let value = self.call("__iter_next__", vec![iterator], None, &name.span)?;
-                self.declare(name, value.ty.clone(), Some(value))?;
+                let value = self.call("__iter_next__", vec![iterator], None, name.span())?;
+                self.declare_binding(name, value)?;
                 self.release_temps();
                 self.loops.push(broken.clone());
-                self.statement(body)?;
+                let Stmt::Block(statements) = body.as_ref() else {
+                    unreachable!()
+                };
+                for statement in statements {
+                    self.statement(statement)?;
+                }
                 self.loops.pop();
                 self.scopes.pop();
                 self.pending_temps = outer_temps;
@@ -698,6 +836,13 @@ impl Compiler {
     }
     fn expr(&mut self, e: &Expr, expected: Option<&str>) -> Result<Value, String> {
         match &e.kind {
+            ExprKind::Tuple(items) => self.tuple_value(items, expected, &e.span),
+            ExprKind::Record(name, fields) => self.record_value(name, fields),
+            ExprKind::Field(receiver, field) => {
+                let receiver = self.expr(receiver, None)?;
+                let (index, ty) = self.field(&receiver.ty, field)?;
+                Ok(self.emit(&ty, format!("{}->field_{index}", receiver.cpp)))
+            }
             ExprKind::Literal(ty, text) => self.literal(ty, text, &e.span),
             ExprKind::Array(items) => {
                 let hint = expected.and_then(vector_element);
@@ -737,6 +882,10 @@ impl Compiler {
             }
             ExprKind::Index(array, index) => {
                 let array = self.expr(array, None)?;
+                if array.ty.starts_with("Tuple<") {
+                    let index_value = tuples::literal_index(index)?;
+                    return self.tuple_item(&array, index_value, &index.span);
+                }
                 let index = self.expr(index, Some("Int"))?;
                 self.call("__getitem__", vec![array, index], None, &e.span)
             }
@@ -773,21 +922,9 @@ impl Compiler {
             }
             ExprKind::Call(n, args) => {
                 let mut values = vec![];
-                for (index, arg) in args.iter().enumerate() {
+                for arg in args {
                     // Use a context only when every remaining overload agrees.
-                    let hints: BTreeSet<_> = self
-                        .functions
-                        .iter()
-                        .filter(|f| {
-                            f.name.text == n.text
-                                && f.params.len() == args.len()
-                                && f.params
-                                    .iter()
-                                    .zip(&values)
-                                    .all(|(ty, v): (&String, &Value)| ty == &v.ty)
-                        })
-                        .map(|f| f.params[index].clone())
-                        .collect();
+                    let hints = self.argument_hints(&n.text, args.len(), &values);
                     let hint = if hints.len() == 1 {
                         hints.first().map(String::as_str)
                     } else {
@@ -824,9 +961,39 @@ impl Compiler {
                 )
             }
             ExprKind::Assign(op, left, right) => {
+                if matches!(left.kind, ExprKind::Tuple(_)) {
+                    if op != "=" && op != ":=" {
+                        return Err(e.span.error("tuple assignment only supports = and :="));
+                    }
+                    let mut value = self.expr(right, None)?;
+                    if op == "=" {
+                        value = self.call("copy", vec![value], None, &right.span)?;
+                    }
+                    return self.assign_tuple_value(op, left, value);
+                }
                 if op == ":=" {
+                    if let ExprKind::Field(receiver, field) = &left.kind {
+                        let receiver = self.expr(receiver, None)?;
+                        let (index, ty) = self.field(&receiver.ty, field)?;
+                        let rhs = self.expr(right, Some(&ty))?;
+                        self.same(&ty, &rhs.ty, &right.span)?;
+                        self.body
+                            .push_str(&format!("{}->field_{index} = {};\n", receiver.cpp, rhs.cpp));
+                        return Ok(self.emit(&ty, rhs.cpp));
+                    }
                     if let ExprKind::Index(array, index) = &left.kind {
                         let array = self.expr(array, None)?;
+                        if array.ty.starts_with("Tuple<") {
+                            let position = tuples::literal_index(index)?;
+                            let item = self.tuple_item(&array, position, &index.span)?;
+                            let rhs = self.expr(right, Some(&item.ty))?;
+                            self.same(&item.ty, &rhs.ty, &right.span)?;
+                            self.body.push_str(&format!(
+                                "{}->field_{position} = {};\n",
+                                array.cpp, rhs.cpp
+                            ));
+                            return Ok(self.emit(&item.ty, rhs.cpp));
+                        }
                         let index = self.expr(index, Some("Int"))?;
                         let element = vector_element(&array.ty).map(str::to_string);
                         let rhs = self.expr(right, element.as_deref())?;
@@ -835,7 +1002,7 @@ impl Compiler {
                     let ExprKind::Var(n) = &left.kind else {
                         return Err(e
                             .span
-                            .error("rebinding requires a variable or an index access"));
+                            .error("rebinding requires a variable, field or index access"));
                     };
                     let v = self.find_var(n)?;
                     let r = self.expr(right, Some(&v.ty))?;
@@ -857,7 +1024,7 @@ impl Compiler {
                     let binary = &op[..1];
                     let inplace = format!("__i{}", &binary_name(binary)[2..]);
                     if self
-                        .select(&inplace, &[target.clone(), rhs.clone()], None, &e.span)?
+                        .resolve(&inplace, &[target.clone(), rhs.clone()], None, &e.span)?
                         .is_some()
                     {
                         self.call(&inplace, vec![target.clone(), rhs], None, &e.span)?;
@@ -878,6 +1045,9 @@ impl Compiler {
 }
 fn binary_name(op: &str) -> &str {
     match op {
+        "&" => "__bitand__",
+        "|" => "__bitor__",
+        "^" => "__bitxor__",
         "+" => "__add__",
         "-" => "__sub__",
         "*" => "__mul__",

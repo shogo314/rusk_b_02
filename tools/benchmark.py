@@ -45,6 +45,7 @@ def version(command):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--compiler', type=Path, default=ROOT/'target/debug/rusk')
+    parser.add_argument('--baseline-compiler', type=Path, help='compare a previous Rusk compiler on the same inputs')
     parser.add_argument('--repeats', type=int, default=3)
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()
@@ -72,6 +73,10 @@ def main():
             for label in ['rusk','native']:
                 subprocess.run(['g++','-std=c++20','-O2',str(temp/f'{label}.cpp'),'-o',str(temp/label)],check=True)
             commands = {'C++':[str(temp/'native')], 'Rusk':[str(temp/'rusk')]}
+            if args.baseline_compiler:
+                subprocess.run([str(args.baseline_compiler.resolve()),'compile',str(temp/'main.rusk'),'-o',str(temp/'previous.cpp')],check=True)
+                subprocess.run(['g++','-std=c++20','-O2',str(temp/'previous.cpp'),'-o',str(temp/'previous')],check=True)
+                commands['Rusk baseline']=[str(temp/'previous')]
             if pypy:
                 commands['PyPy']=[pypy,str(temp/'baseline.py')]
             reference = None
