@@ -11,8 +11,12 @@ Rusk は競技プログラミング向けの言語です。作者自身にとっ
 
 - [はじめに](getting-started/index.md)：導入と最初のプログラム。
 - [言語リファレンス](reference/index.md)：構文と振る舞い。
+- [文法一覧（EBNF）](reference/grammar.md)：字句、全構文、演算子の優先順位。
+- [型・共有・評価の規則](reference/semantics.md)：型推論、代入、スコープ、関数選択。
+- [エラーと制限](reference/errors.md)：診断の読み方と修正方法。
 - [β02の型とライブラリ分割](reference/beta02.md)：構造体、タプル、型引数、自作ライブラリ。
 - [標準ライブラリ](library/index.md)：型・関数の使い方と計算量。
+- [Ruskで記述したデータ構造](library/data-structures.md)：Union-Find、Fenwick Tree、セグメント木のAPI。
 - [開発ガイド](development/index.md)：実装とドキュメントの更新。
 
 ## 設計の背景

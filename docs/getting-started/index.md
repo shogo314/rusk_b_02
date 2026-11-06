@@ -38,4 +38,6 @@ wt a.sum();
 
 `examples/prototype/` に配列の合計（`array_sum.rusk`）、ソートと二分探索（`sort_search.rusk`）、グリッドBFS（`grid_bfs.rusk`）、再帰による剰余累乗（`pow_mod.rusk`）があります。最初の例と同じ手順でC++に変換して実行できます。
 
+構文の全体像は [文法一覧（EBNF）](../reference/grammar.md)、型や代入の詳しい規則は [型・共有・評価](../reference/semantics.md) を参照してください。
+
 書き方は [言語リファレンス](../reference/index.md)、処理系の構成は [開発ガイド](../development/index.md) を参照してください。

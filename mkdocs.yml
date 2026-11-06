@@ -13,8 +13,13 @@ nav:
   - はじめに: getting-started/index.md
   - 言語リファレンス:
       - 基本構文と共有: reference/index.md
+      - 文法一覧（EBNF）: reference/grammar.md
+      - 型・共有・評価の規則: reference/semantics.md
       - β02の型とライブラリ分割: reference/beta02.md
-  - 標準ライブラリ: library/index.md
+      - エラーと制限: reference/errors.md
+  - ライブラリ:
+      - 標準ライブラリ: library/index.md
+      - Ruskで記述したデータ構造: library/data-structures.md
   - 開発ガイド:
       - 開発の進め方: development/index.md
       - テストの実行: development/verification.md
