@@ -34,7 +34,9 @@ python -m mkdocs build --strict
 
 ## GitHub Pages へ公開する
 
-公開用ワークフローは `.github/workflows/docs.yml` にあります。プルリクエストと `main` への変更ではビルドを検査し、公開は Actions の **Documentation** ワークフローを手動実行した場合だけ行います。
+公開用ワークフローは `.github/workflows/docs.yml` にあります。`main` にドキュメント関連の変更をpushすると、strictビルドの成功後に自動で公開します。対象は `docs/**`、`mkdocs.yml`、`requirements-docs.txt`、公開ワークフロー自身です。プルリクエストではビルド検査だけを行います。
+
+必要なら Actions の **Documentation** ワークフローを `main` に対して手動実行して再公開できます。公開ジョブは同時に実行しないよう制御しています。
 
 初回公開前に GitHub の **Settings → Pages → Build and deployment → Source** を **GitHub Actions** に設定します。想定する公開先は `https://shogo314.github.io/rusk_b_02/` です。
 
